@@ -85,3 +85,6 @@ cert.pem
 
 # AI-assistant notes
 CLAUDE.md
+
+# Mac
+.DS_Store
