@@ -803,6 +803,8 @@ def parse_arguments():
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
     parser.add_argument("--left-port", help="Left arm serial port (overrides config file)")
     parser.add_argument("--right-port", help="Right arm serial port (overrides config file)")
+    parser.add_argument("--arm", choices=["left", "right", "dual"], default="dual",
+                       help="Which arm(s) to use: left, right, or dual (default: dual)")
     
     return parser.parse_args()
 
@@ -821,6 +823,7 @@ def create_config_from_args(args) -> TelegripConfig:
     config.enable_keyboard = not args.no_keyboard
     config.autoconnect = args.autoconnect
     config.log_level = args.log_level
+    config.enabled_arms = args.arm  # Set which arms are enabled
     
     config.https_port = args.https_port
     config.websocket_port = args.ws_port

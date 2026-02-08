@@ -100,7 +100,8 @@ class ControlLoop:
                 self.visualizer = PyBulletVisualizer(
                     self.config.get_absolute_urdf_path(), 
                     use_gui=self.config.enable_pybullet_gui,
-                    log_level=self.config.log_level
+                    log_level=self.config.log_level,
+                    config=self.config  # Pass config for arm selection
                 )
                 if not self.visualizer.setup():
                     error_msg = "PyBullet visualizer setup failed"
@@ -439,9 +440,17 @@ class ControlLoop:
         if not self.visualizer:
             return
         
-        # Update robot poses for both arms using ACTUAL angles from robot hardware
-        left_angles = self.robot_interface.get_actual_arm_angles("left")
-        right_angles = self.robot_interface.get_actual_arm_angles("right")
+        # Update robot poses for both arms
+        # In pure simulation mode (no robot engaged), use the computed IK solution angles
+        # When robot is engaged, use actual hardware feedback angles
+        if self.robot_interface.is_engaged:
+            # Use actual robot hardware angles for real-time feedback
+            left_angles = self.robot_interface.get_actual_arm_angles("left")
+            right_angles = self.robot_interface.get_actual_arm_angles("right")
+        else:
+            # Use computed/target angles for pure simulation (no robot hardware)
+            left_angles = self.robot_interface.get_arm_angles("left")
+            right_angles = self.robot_interface.get_arm_angles("right")
         
         self.visualizer.update_robot_pose(left_angles, 'left')
         self.visualizer.update_robot_pose(right_angles, 'right')

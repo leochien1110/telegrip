@@ -221,6 +221,9 @@ class TelegripConfig:
     autoconnect: bool = False
     log_level: str = "warning"
     
+    # Arm control - which arms are enabled ("left", "right", or "dual")
+    enabled_arms: str = "dual"  # Options: "left", "right", "dual"
+    
     # Paths
     urdf_path: str = URDF_PATH
     webapp_dir: str = "webapp"
@@ -292,6 +295,19 @@ class TelegripConfig:
         cert_path = str(get_absolute_path(self.certfile))
         key_path = str(get_absolute_path(self.keyfile))
         return cert_path, key_path
+    
+    def is_arm_enabled(self, arm: str) -> bool:
+        """Check if a specific arm is enabled.
+        
+        Args:
+            arm: "left" or "right"
+            
+        Returns:
+            True if the arm is enabled, False otherwise
+        """
+        if self.enabled_arms == "dual":
+            return True
+        return self.enabled_arms == arm
 
 def get_config_data():
     """Get the current configuration data."""

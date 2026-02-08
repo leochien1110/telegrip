@@ -142,33 +142,41 @@ class RobotInterface:
                 logger.info("Connecting to robot...")
             
             # Connect left arm
-            try:
-                if should_suppress:
-                    with suppress_stdout_stderr():
+            if self.config.is_arm_enabled("left"):
+                try:
+                    if should_suppress:
+                        with suppress_stdout_stderr():
+                            self.left_robot = SO100Follower(left_config)
+                            self.left_robot.connect()
+                    else:
                         self.left_robot = SO100Follower(left_config)
                         self.left_robot.connect()
-                else:
-                    self.left_robot = SO100Follower(left_config)
-                    self.left_robot.connect()
-                self.left_arm_connected = True
-                logger.info("✅ Left arm connected successfully")
-            except Exception as e:
-                logger.error(f"❌ Left arm connection failed: {e}")
+                    self.left_arm_connected = True
+                    logger.info("✅ Left arm connected successfully")
+                except Exception as e:
+                    logger.error(f"❌ Left arm connection failed: {e}")
+                    self.left_arm_connected = False
+            else:
+                logger.info("⏭️  Left arm disabled (not connecting)")
                 self.left_arm_connected = False
             
             # Connect right arm  
-            try:
-                if should_suppress:
-                    with suppress_stdout_stderr():
+            if self.config.is_arm_enabled("right"):
+                try:
+                    if should_suppress:
+                        with suppress_stdout_stderr():
+                            self.right_robot = SO100Follower(right_config)
+                            self.right_robot.connect()
+                    else:
                         self.right_robot = SO100Follower(right_config)
                         self.right_robot.connect()
-                else:
-                    self.right_robot = SO100Follower(right_config)
-                    self.right_robot.connect()
-                self.right_arm_connected = True
-                logger.info("✅ Right arm connected successfully")
-            except Exception as e:
-                logger.error(f"❌ Right arm connection failed: {e}")
+                    self.right_arm_connected = True
+                    logger.info("✅ Right arm connected successfully")
+                except Exception as e:
+                    logger.error(f"❌ Right arm connection failed: {e}")
+                    self.right_arm_connected = False
+            else:
+                logger.info("⏭️  Right arm disabled (not connecting)")
                 self.right_arm_connected = False
                 
             # Mark as connected if at least one arm is connected
@@ -558,8 +566,20 @@ class RobotInterface:
         logger.info("🔌 Robot disconnected")
     
     def get_arm_connection_status(self, arm: str) -> bool:
-        """Get connection status for specific arm based on device file existence."""
-        # Only check device file existence - ignore overall robot connection status
+        """Get connection status for specific arm.
+        
+        In pure simulation mode (robot disabled), check if arm is enabled.
+        When robot is enabled, check device file existence.
+        """
+        # First check if arm is enabled in configuration
+        if not self.config.is_arm_enabled(arm):
+            return False
+        
+        # In pure simulation mode, treat enabled arms as connected
+        if not self.config.enable_robot:
+            return True
+        
+        # When robot is enabled, check device file existence
         if arm == "left":
             device_path = self.config.follower_ports["left"]
             return os.path.exists(device_path)

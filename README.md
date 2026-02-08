@@ -158,6 +158,7 @@ telegrip --autoconnect
    - **A/D**: Left/Right 
    - **Q/E**: Down/Up
    - **Z/X**: Wrist roll
+   - **R/T**: Wrist flex
    - **F**: Toggle gripper open/closed
 
 **Right Arm Control**:
@@ -165,6 +166,7 @@ telegrip --autoconnect
    - **J/L**: Left/Right
    - **U/O**: Up/Down
    - **N/M**: Wrist roll
+   - **H/Y**: Wrist flex
    - **; (semicolon)**: Toggle gripper open/closed
 
 ## Architecture

@@ -57,10 +57,11 @@ def suppress_stdout_stderr():
 class PyBulletVisualizer:
     """PyBullet visualization for robot teleoperation."""
     
-    def __init__(self, urdf_path: str, use_gui: bool = True, log_level: str = "warning"):
+    def __init__(self, urdf_path: str, use_gui: bool = True, log_level: str = "warning", config=None):
         self.urdf_path = urdf_path
         self.use_gui = use_gui
         self.log_level = log_level
+        self.config = config
         
         # PyBullet state
         self.physics_client = None
@@ -79,10 +80,20 @@ class PyBulletVisualizer:
         self.is_connected = False
     
     def _can_use_display(self) -> bool:
-        """Check if X11/display is available for GUI mode with OpenGL support."""
+        """Check if display is available for GUI mode with OpenGL support."""
+        import platform
+        
+        # On macOS, PyBullet uses native OpenGL/Cocoa, no X11 needed
+        if platform.system() == 'Darwin':  # macOS
+            # On macOS, GUI should work unless we're running headless (e.g., SSH without X11 forwarding)
+            # PyBullet on macOS doesn't require DISPLAY variable
+            return True
+        
+        # On Linux, check for X11 display
         display = os.environ.get('DISPLAY')
         if not display:
             return False
+        
         # Try to verify X11 connection is possible
         try:
             import subprocess
@@ -178,26 +189,57 @@ class PyBulletVisualizer:
             logger.error(f"URDF file not found: {self.urdf_path}")
             return False
         
-        try:
-            if should_suppress_output:
-                with suppress_stdout_stderr():
+        # Load left robot if enabled
+        if self.config and self.config.is_arm_enabled("left"):
+            try:
+                if should_suppress_output:
+                    with suppress_stdout_stderr():
+                        self.robot_ids['left'] = p.loadURDF(self.urdf_path, [0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
+                else:
                     self.robot_ids['left'] = p.loadURDF(self.urdf_path, [0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
-            else:
-                self.robot_ids['left'] = p.loadURDF(self.urdf_path, [0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
-        except p.error as e:
-            logger.error(f"Failed to load URDF: {e}")
-            return False
+                logger.info("✅ Left robot loaded in visualization")
+            except p.error as e:
+                logger.error(f"Failed to load left robot URDF: {e}")
+                return False
+        elif self.config:
+            logger.info("⏭️  Left robot skipped (arm disabled)")
+        else:
+            # Fallback for when config is not provided (backward compatibility)
+            try:
+                if should_suppress_output:
+                    with suppress_stdout_stderr():
+                        self.robot_ids['left'] = p.loadURDF(self.urdf_path, [0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
+                else:
+                    self.robot_ids['left'] = p.loadURDF(self.urdf_path, [0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
+            except p.error as e:
+                logger.error(f"Failed to load URDF: {e}")
+                return False
         
-        # Load right robot 40cm away in X direction
-        try:
-            if should_suppress_output:
-                with suppress_stdout_stderr():
+        # Load right robot if enabled
+        if self.config and self.config.is_arm_enabled("right"):
+            try:
+                if should_suppress_output:
+                    with suppress_stdout_stderr():
+                        self.robot_ids['right'] = p.loadURDF(self.urdf_path, [-0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
+                else:
                     self.robot_ids['right'] = p.loadURDF(self.urdf_path, [-0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
-            else:
-                self.robot_ids['right'] = p.loadURDF(self.urdf_path, [-0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
-        except p.error as e:
-            logger.error(f"Failed to load right robot URDF: {e}")
-            return False
+                logger.info("✅ Right robot loaded in visualization")
+            except p.error as e:
+                logger.error(f"Failed to load right robot URDF: {e}")
+                return False
+        elif self.config:
+            logger.info("⏭️  Right robot skipped (arm disabled)")
+        else:
+            # Fallback for when config is not provided (backward compatibility)
+            try:
+                if should_suppress_output:
+                    with suppress_stdout_stderr():
+                        self.robot_ids['right'] = p.loadURDF(self.urdf_path, [-0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
+                else:
+                    self.robot_ids['right'] = p.loadURDF(self.urdf_path, [-0.2, 0, 0], [0, 0, 0, 1], useFixedBase=1)
+            except p.error as e:
+                logger.error(f"Failed to load right robot URDF: {e}")
+                return False
         
         # Map joint names to PyBullet indices
         if not self._map_joints():
@@ -226,6 +268,12 @@ class PyBulletVisualizer:
         success = True
         
         for arm_name, robot_id in self.robot_ids.items():
+            # Skip disabled arms
+            if robot_id is None:
+                if getattr(logging, self.log_level.upper()) <= logging.INFO:
+                    logger.info(f"Skipping joint mapping for {arm_name} robot (arm disabled)")
+                continue
+                
             if getattr(logging, self.log_level.upper()) <= logging.INFO:
                 logger.info(f"Mapping joints for {arm_name} robot:")
             num_joints = p.getNumJoints(robot_id)
@@ -263,6 +311,12 @@ class PyBulletVisualizer:
         success = True
         
         for arm_name, robot_id in self.robot_ids.items():
+            # Skip disabled arms
+            if robot_id is None:
+                if getattr(logging, self.log_level.upper()) <= logging.INFO:
+                    logger.info(f"Skipping end effector search for {arm_name} robot (arm disabled)")
+                continue
+                
             num_joints = p.getNumJoints(robot_id)
             found = False
             for i in range(num_joints):
