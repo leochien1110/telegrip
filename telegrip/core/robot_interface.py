@@ -17,9 +17,7 @@ from lerobot.robots.so100_follower.config_so100_follower import SO100FollowerCon
 from lerobot.robots.so100_follower.so100_follower import SO100Follower
 
 from ..config import (
-    TelegripConfig, NUM_JOINTS, JOINT_NAMES,
-    GRIPPER_OPEN_ANGLE, GRIPPER_CLOSED_ANGLE, 
-    WRIST_FLEX_INDEX, URDF_TO_INTERNAL_NAME_MAP
+    TelegripConfig, ROBOT_CONFIGS
 )
 from .kinematics import ForwardKinematics, IKSolver
 
@@ -68,17 +66,29 @@ class RobotInterface:
         self.is_connected = False
         self.is_engaged = False  # New state for motor engagement
         
+        # Load robot-specific configuration
+        self.robot_type = self.config.robot_type
+        if self.robot_type not in ROBOT_CONFIGS:
+            logger.warning(f"Unknown robot type {self.robot_type}, falling back to so100")
+            self.robot_config = ROBOT_CONFIGS["so100"]
+        else:
+            self.robot_config = ROBOT_CONFIGS[self.robot_type]
+            
+        self.joint_names = self.robot_config["joint_names"]
+        self.num_joints = len(self.joint_names)
+        self.num_ik_joints = self.robot_config["num_ik_joints"]
+        
         # Individual arm connection status
         self.left_arm_connected = False
         self.right_arm_connected = False
         
         # Joint state
-        self.left_arm_angles = np.zeros(NUM_JOINTS)
-        self.right_arm_angles = np.zeros(NUM_JOINTS)
+        self.left_arm_angles = np.zeros(self.num_joints)
+        self.right_arm_angles = np.zeros(self.num_joints)
         
         # Joint limits (will be set by visualizer)
-        self.joint_limits_min_deg = np.full(NUM_JOINTS, -180.0)
-        self.joint_limits_max_deg = np.full(NUM_JOINTS, 180.0)
+        self.joint_limits_min_deg = np.full(self.num_joints, -180.0)
+        self.joint_limits_max_deg = np.full(self.num_joints, 180.0)
         
         # Kinematics solvers (will be set after PyBullet setup)
         self.fk_solvers = {'left': None, 'right': None}
@@ -94,9 +104,17 @@ class RobotInterface:
         self.max_arm_errors = 3  # Allow fewer errors per arm before marking as disconnected
         self.max_general_errors = 8  # Allow more general errors before full disconnection
         
-        # Initial positions for safe shutdown - restored original values
-        self.initial_left_arm = np.array([0, -100, 100, 60, 0, 0])
-        self.initial_right_arm = np.array([0, -100, 100, 60, 0, 0])
+        # Initial positions for safe shutdown
+        # TODO: Make this dynamic based on robot type/URDF
+        # For now, using logic similar to old implementation but resized
+        self.initial_left_arm = np.zeros(self.num_joints)
+        self.initial_right_arm = np.zeros(self.num_joints)
+        
+        # Set default SO-100 initial pose if applicable
+        if self.robot_type == "so100" and self.num_joints >= 6:
+            # np.array([0, -100, 100, 60, 0, 0])
+            self.initial_left_arm[:6] = [0, -100, 100, 60, 0, 0]
+            self.initial_right_arm[:6] = [0, -100, 100, 60, 0, 0]
     
     def setup_robot_configs(self) -> Tuple[SO100FollowerConfig, SO100FollowerConfig]:
         """Create robot configurations for both arms."""
@@ -202,29 +220,28 @@ class RobotInterface:
             if self.left_robot and self.left_arm_connected:
                 observation = self.left_robot.get_observation()
                 if observation:
-                    # Extract joint positions from observation
-                    self.left_arm_angles = np.array([
-                        observation['shoulder_pan.pos'],
-                        observation['shoulder_lift.pos'],
-                        observation['elbow_flex.pos'],
-                        observation['wrist_flex.pos'],
-                        observation['wrist_roll.pos'],
-                        observation['gripper.pos']
-                    ])
+                    # Extract joint positions from observation using dynamic names
+                    angles = []
+                    for name in self.joint_names:
+                        key = f"{name}.pos"
+                        if key in observation:
+                            angles.append(observation[key])
+                        else:
+                            angles.append(0.0) # Fallback
+                    self.left_arm_angles = np.array(angles)
                     logger.info(f"Left arm initial state: {self.left_arm_angles.round(1)}")
                     
             if self.right_robot and self.right_arm_connected:
                 observation = self.right_robot.get_observation()
                 if observation:
-                    # Extract joint positions from observation
-                    self.right_arm_angles = np.array([
-                        observation['shoulder_pan.pos'],
-                        observation['shoulder_lift.pos'],
-                        observation['elbow_flex.pos'],
-                        observation['wrist_flex.pos'],
-                        observation['wrist_roll.pos'],
-                        observation['gripper.pos']
-                    ])
+                    angles = []
+                    for name in self.joint_names:
+                        key = f"{name}.pos"
+                        if key in observation:
+                            angles.append(observation[key])
+                        else:
+                            angles.append(0.0)
+                    self.right_arm_angles = np.array(angles)
                     logger.info(f"Right arm initial state: {self.right_arm_angles.round(1)}")
                     
         except Exception as e:
@@ -234,18 +251,29 @@ class RobotInterface:
                         end_effector_link_indices: Dict, joint_limits_min_deg: np.ndarray, 
                         joint_limits_max_deg: np.ndarray):
         """Setup kinematics solvers using PyBullet components for both arms."""
-        self.joint_limits_min_deg = joint_limits_min_deg.copy()
-        self.joint_limits_max_deg = joint_limits_max_deg.copy()
+        
+        # Ensure limits match current num_joints
+        if len(joint_limits_min_deg) == self.num_joints:
+             self.joint_limits_min_deg = joint_limits_min_deg.copy()
+             self.joint_limits_max_deg = joint_limits_max_deg.copy()
         
         # Setup solvers for both arms
         for arm in ['left', 'right']:
             self.fk_solvers[arm] = ForwardKinematics(
-                physics_client, robot_ids[arm], joint_indices[arm], end_effector_link_indices[arm]
+                physics_client, robot_ids[arm], joint_indices[arm], end_effector_link_indices[arm],
+                self.num_joints
             )
             
             self.ik_solvers[arm] = IKSolver(
                 physics_client, robot_ids[arm], joint_indices[arm], end_effector_link_indices[arm],
-                joint_limits_min_deg, joint_limits_max_deg, arm_name=arm
+                self.joint_limits_min_deg, self.joint_limits_max_deg, 
+                self.num_joints, self.num_ik_joints,
+                use_reference_poses=self.config.use_reference_poses,
+                reference_poses_file=self.config.reference_poses_file,
+                ik_position_error_threshold=self.config.ik_position_error_threshold,
+                ik_hysteresis_threshold=self.config.ik_hysteresis_threshold,
+                ik_movement_penalty_weight=self.config.ik_movement_penalty_weight,
+                arm_name=arm
             )
         
         logger.info("Kinematics solvers initialized for both arms")
@@ -279,7 +307,7 @@ class RobotInterface:
         if self.ik_solvers[arm]:
             return self.ik_solvers[arm].solve(target_position, target_orientation, current_angles)
         else:
-            return current_angles[:3]  # Return current angles if no IK solver
+            return current_angles[:self.num_ik_joints]  # Return current angles if no IK solver
     
     def clamp_joint_angles(self, joint_angles: np.ndarray) -> np.ndarray:
         """Clamp joint angles to safe limits with margins for problem joints."""
@@ -290,7 +318,7 @@ class RobotInterface:
         # Check if first joint (shoulder_pan) is outside limits but can be wrapped
         shoulder_pan_idx = 0
         shoulder_pan_angle = processed_angles[shoulder_pan_idx]
-        min_limit = self.joint_limits_min_deg[shoulder_pan_idx]  # -120.3°
+        min_limit = self.joint_limits_min_deg[shoulder_pan_idx]  # -120.3° (example)
         max_limit = self.joint_limits_max_deg[shoulder_pan_idx]  # +120.3°
         
         # Try to wrap the angle to an equivalent angle within limits
@@ -307,7 +335,9 @@ class RobotInterface:
         return np.clip(processed_angles, self.joint_limits_min_deg, self.joint_limits_max_deg)
     
     def update_arm_angles(self, arm: str, ik_angles: np.ndarray, wrist_flex: float, wrist_roll: float, gripper: float):
-        """Update joint angles for specified arm with IK solution and direct wrist/gripper control."""
+        """Update joint angles for specified arm with IK solution and direct wrist/gripper control.
+           If IK covers wrists, wrist params are ignored.
+        """
         if arm == "left":
             target_angles = self.left_arm_angles
         elif arm == "right":
@@ -315,21 +345,33 @@ class RobotInterface:
         else:
             raise ValueError(f"Invalid arm: {arm}")
         
-        # Update first 3 joints with IK solution
-        target_angles[:3] = ik_angles
+        # Update joints handled by IK
+        target_angles[:self.num_ik_joints] = ik_angles
         
-        # Set wrist angles directly
-        target_angles[3] = wrist_flex
-        target_angles[4] = wrist_roll
+        # Helper to get index
+        def get_idx(key):
+            return self.robot_config.get(key)
+
+        # Handle Wrist Flex if NOT in IK
+        wf_idx = get_idx("wrist_flex_index")
+        if wf_idx is not None and wf_idx >= self.num_ik_joints:
+             target_angles[wf_idx] = wrist_flex
+
+        # Handle Wrist Roll if NOT in IK
+        wr_idx = get_idx("wrist_roll_index")
+        if wr_idx is not None and wr_idx >= self.num_ik_joints:
+             target_angles[wr_idx] = wrist_roll
+
+        # Handle Gripper if NOT in IK (usually not)
+        g_idx = get_idx("gripper_index")
+        if g_idx is not None:
+             target_angles[g_idx] = np.clip(gripper, self.config.gripper_open_angle, self.config.gripper_closed_angle)
         
-        # Handle gripper separately (clamp to gripper limits)
-        target_angles[5] = np.clip(gripper, GRIPPER_OPEN_ANGLE, GRIPPER_CLOSED_ANGLE)
-        
-        # Apply joint limits to all joints (except gripper which we handle specially)
+        # Apply joint limits to all joints
         clamped_angles = self.clamp_joint_angles(target_angles)
         
-        # Preserve gripper control (don't clamp gripper if it was set intentionally)
-        clamped_angles[5] = target_angles[5]
+        # Preserve gripper control (don't clamp gripper if it was set explicitly here and might slightly exceed limit if noise)
+        # Actually clamping above is good.
         
         if arm == "left":
             self.left_arm_angles = clamped_angles
@@ -377,20 +419,20 @@ class RobotInterface:
             return True  # Don't send too frequently
         
         try:
-            # Send commands with dictionary format - no joint direction mapping
+            # Send commands with dictionary format
             success = True
             
+            def construct_action_dict(angles):
+                action = {}
+                for i, name in enumerate(self.joint_names):
+                    if i < len(angles):
+                        action[f"{name}.pos"] = float(angles[i])
+                return action
+
             # Send left arm command
             if self.left_robot and self.left_arm_connected:
                 try:
-                    action_dict = {
-                        "shoulder_pan.pos": float(self.left_arm_angles[0]),
-                        "shoulder_lift.pos": float(self.left_arm_angles[1]),
-                        "elbow_flex.pos": float(self.left_arm_angles[2]),
-                        "wrist_flex.pos": float(self.left_arm_angles[3]),
-                        "wrist_roll.pos": float(self.left_arm_angles[4]),
-                        "gripper.pos": float(self.left_arm_angles[5])
-                    }
+                    action_dict = construct_action_dict(self.left_arm_angles)
                     self.left_robot.send_action(action_dict)
                 except Exception as e:
                     logger.error(f"Error sending left arm command: {e}")
@@ -403,14 +445,7 @@ class RobotInterface:
             # Send right arm command
             if self.right_robot and self.right_arm_connected:
                 try:
-                    action_dict = {
-                        "shoulder_pan.pos": float(self.right_arm_angles[0]),
-                        "shoulder_lift.pos": float(self.right_arm_angles[1]),
-                        "elbow_flex.pos": float(self.right_arm_angles[2]),
-                        "wrist_flex.pos": float(self.right_arm_angles[3]),
-                        "wrist_roll.pos": float(self.right_arm_angles[4]),
-                        "gripper.pos": float(self.right_arm_angles[5])
-                    }
+                    action_dict = construct_action_dict(self.right_arm_angles)
                     self.right_robot.send_action(action_dict)
                 except Exception as e:
                     logger.error(f"Error sending right arm command: {e}")
@@ -433,12 +468,18 @@ class RobotInterface:
     
     def set_gripper(self, arm: str, closed: bool):
         """Set gripper state for specified arm."""
-        angle = GRIPPER_CLOSED_ANGLE if closed else GRIPPER_OPEN_ANGLE
+        angle = self.config.gripper_closed_angle if closed else self.config.gripper_open_angle
         
+        # Get gripper index
+        g_idx = self.robot_config.get("gripper_index")
+        
+        if g_idx is None:
+             return # No gripper
+
         if arm == "left":
-            self.left_arm_angles[5] = angle
+            self.left_arm_angles[g_idx] = angle
         elif arm == "right":
-            self.right_arm_angles[5] = angle
+            self.right_arm_angles[g_idx] = angle
         else:
             raise ValueError(f"Invalid arm: {arm}")
     
@@ -464,25 +505,20 @@ class RobotInterface:
             if arm == "left" and self.left_robot and self.left_arm_connected:
                 observation = self.left_robot.get_observation()
                 if observation:
-                    return np.array([
-                        observation['shoulder_pan.pos'],
-                        observation['shoulder_lift.pos'],
-                        observation['elbow_flex.pos'],
-                        observation['wrist_flex.pos'],
-                        observation['wrist_roll.pos'],
-                        observation['gripper.pos']
-                    ])
+                    # Construct array from observation
+                    vals = []
+                    for name in self.joint_names:
+                        vals.append(observation.get(f"{name}.pos", 0.0))
+                    return np.array(vals)
+                    
             elif arm == "right" and self.right_robot and self.right_arm_connected:
                 observation = self.right_robot.get_observation()
                 if observation:
-                    return np.array([
-                        observation['shoulder_pan.pos'],
-                        observation['shoulder_lift.pos'],
-                        observation['elbow_flex.pos'],
-                        observation['wrist_flex.pos'],
-                        observation['wrist_roll.pos'],
-                        observation['gripper.pos']
-                    ])
+                    vals = []
+                    for name in self.joint_names:
+                         vals.append(observation.get(f"{name}.pos", 0.0))
+                    return np.array(vals)
+                    
         except Exception as e:
             logger.debug(f"Error reading actual arm angles for {arm}: {e}")
         
@@ -494,7 +530,7 @@ class RobotInterface:
         logger.info("⏪ Returning robot to initial position...")
         
         try:
-            # Set initial positions - no direction mapping
+            # Set initial positions
             self.left_arm_angles = self.initial_left_arm.copy()
             self.right_arm_angles = self.initial_right_arm.copy()
             
@@ -606,4 +642,4 @@ class RobotInterface:
             "right_arm_angles": self.right_arm_angles.tolist(),
             "joint_limits_min": self.joint_limits_min_deg.tolist(),
             "joint_limits_max": self.joint_limits_max_deg.tolist(),
-        } 
+        }

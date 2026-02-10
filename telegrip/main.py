@@ -789,21 +789,21 @@ def parse_arguments():
                        help="Set logging level (default: warning)")
     
     # Network settings
-    parser.add_argument("--https-port", type=int, default=8443, help="HTTPS server port")
-    parser.add_argument("--ws-port", type=int, default=8442, help="WebSocket server port")
-    parser.add_argument("--host", default="0.0.0.0", help="Host IP address")
+    parser.add_argument("--https-port", type=int, help="HTTPS server port")
+    parser.add_argument("--ws-port", type=int, help="WebSocket server port")
+    parser.add_argument("--host", help="Host IP address")
     
     # Paths
-    parser.add_argument("--urdf", default="URDF/SO100/so100.urdf", help="Path to robot URDF file")
-    parser.add_argument("--webapp", default="webapp", help="Path to webapp directory")
-    parser.add_argument("--cert", default="cert.pem", help="Path to SSL certificate")
-    parser.add_argument("--key", default="key.pem", help="Path to SSL private key")
+    parser.add_argument("--urdf", help="Path to robot URDF file")
+    parser.add_argument("--webapp", help="Path to webapp directory")
+    parser.add_argument("--cert", help="Path to SSL certificate")
+    parser.add_argument("--key", help="Path to SSL private key")
     
     # Robot settings
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
     parser.add_argument("--left-port", help="Left arm serial port (overrides config file)")
     parser.add_argument("--right-port", help="Right arm serial port (overrides config file)")
-    parser.add_argument("--arm", choices=["left", "right", "dual"], default="dual",
+    parser.add_argument("--arm", choices=["left", "right", "dual"],
                        help="Which arm(s) to use: left, right, or dual (default: dual)")
     
     return parser.parse_args()
@@ -811,28 +811,51 @@ def parse_arguments():
 
 def create_config_from_args(args) -> TelegripConfig:
     """Create configuration object from command line arguments."""
-    # First load the config file
-    config_data = get_config_data()
+    # Reload config if a custom config file is specified
+    if args.config != "config.yaml":
+        from .config import reload_config
+        reload_config(args.config)
+    
+    # Now create config with updated globals
     config = TelegripConfig()
     
-    # Apply command line overrides
-    config.enable_robot = not args.no_robot
-    config.enable_pybullet = not args.no_sim
-    config.enable_pybullet_gui = config.enable_pybullet and not args.no_viz
-    config.enable_vr = not args.no_vr
-    config.enable_keyboard = not args.no_keyboard
-    config.autoconnect = args.autoconnect
-    config.log_level = args.log_level
-    config.enabled_arms = args.arm  # Set which arms are enabled
+    # Apply command line overrides (only if flags are set)
+    if args.no_robot:
+        config.enable_robot = False
+    if args.no_sim:
+        config.enable_pybullet = False
+    if args.no_viz:
+        config.enable_pybullet_gui = False
+    if args.no_vr:
+        config.enable_vr = False
+    if args.no_keyboard:
+        config.enable_keyboard = False
+    if args.autoconnect:
+        config.autoconnect = True
+    if args.log_level:
+        config.log_level = args.log_level
+    if args.arm:
+        config.enabled_arms = args.arm
     
-    config.https_port = args.https_port
-    config.websocket_port = args.ws_port
-    config.host_ip = args.host
+    # Consistency checks
+    if config.enable_pybullet is False: # Check against False explicitly since it might be None but defaulted in __post_init__
+        config.enable_pybullet_gui = False
     
-    config.urdf_path = args.urdf
-    config.webapp_dir = args.webapp
-    config.certfile = args.cert
-    config.keyfile = args.key
+    if args.https_port:
+        config.https_port = args.https_port
+    if args.ws_port:
+        config.websocket_port = args.ws_port
+    if args.host:
+        config.host_ip = args.host
+    
+    if args.urdf:
+        config.urdf_path = args.urdf
+    if args.webapp:
+        config.webapp_dir = args.webapp
+    if args.cert:
+        config.certfile = args.cert
+    if args.key:
+        config.keyfile = args.key
     
     # Handle port configuration - use command line args if provided, otherwise use config file values
     if args.left_port or args.right_port:

@@ -12,22 +12,17 @@ import json
 import os
 from pathlib import Path
 
-from ..config import (
-    NUM_JOINTS, NUM_IK_JOINTS, 
-    USE_REFERENCE_POSES, REFERENCE_POSES_FILE, IK_POSITION_ERROR_THRESHOLD,
-    IK_HYSTERESIS_THRESHOLD, IK_MOVEMENT_PENALTY_WEIGHT
-)
-
 logger = logging.getLogger(__name__)
 
 class ForwardKinematics:
     """Forward kinematics solver using PyBullet."""
     
-    def __init__(self, physics_client, robot_id: int, joint_indices: list, end_effector_link_index: int):
+    def __init__(self, physics_client, robot_id: int, joint_indices: list, end_effector_link_index: int, num_joints: int):
         self.physics_client = physics_client
         self.robot_id = robot_id
         self.joint_indices = joint_indices
         self.end_effector_link_index = end_effector_link_index
+        self.num_joints = num_joints
     
     def compute(self, joint_angles_deg: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -42,16 +37,25 @@ class ForwardKinematics:
         if self.physics_client is None or self.robot_id is None:
             return np.array([0.2, 0.0, 0.15]), np.array([0, 0, 0, 1])
         
-        # Use joint angles but keep gripper at neutral position for FK calculation
-        # to ensure Wrist_Pitch_Roll position is independent of gripper state
+        # Use joint angles
         fk_state_angles = joint_angles_deg.copy()
-        fk_state_angles[5] = 0.0  # Set gripper to neutral (closed) position for FK calculation
         
+        # NOTE: logic about resetting gripper index 5 might be SO-100 specific.
+        # But if num_joints <= 6, index 5 is gripper or last joint.
+        # For general purpose, we might not want to hardcode index 5 reset.
+        # But for stability, we assume gripper is at the end.
+        if len(fk_state_angles) > 5:
+             # Assuming last joint is gripper, or specialized handling needed.
+             # For now, let's just use the angles as is, assuming FK handles all joints.
+             pass
+
         # Set joint positions
         joint_angles_rad = np.deg2rad(fk_state_angles)
-        for i in range(NUM_JOINTS):
+        for i in range(self.num_joints):
             if i < len(self.joint_indices) and self.joint_indices[i] is not None:
-                p.resetJointState(self.robot_id, self.joint_indices[i], joint_angles_rad[i])
+                # Ensure we don't go out of bounds of angles array
+                if i < len(joint_angles_rad):
+                    p.resetJointState(self.robot_id, self.joint_indices[i], joint_angles_rad[i])
         
         # Get end effector position and orientation
         link_state = p.getLinkState(self.robot_id, self.end_effector_link_index)
@@ -66,47 +70,64 @@ class IKSolver:
     
     def __init__(self, physics_client, robot_id: int, joint_indices: list, 
                  end_effector_link_index: int, joint_limits_min_deg: np.ndarray, 
-                 joint_limits_max_deg: np.ndarray, arm_name: str = ""):
+                 joint_limits_max_deg: np.ndarray, num_joints: int, num_ik_joints: int,
+                 use_reference_poses: bool = False, reference_poses_file: str = "",
+                 ik_position_error_threshold: float = 0.001,
+                 ik_hysteresis_threshold: float = 0.05,
+                 ik_movement_penalty_weight: float = 0.01,
+                 arm_name: str = ""):
         self.physics_client = physics_client
         self.robot_id = robot_id
         self.joint_indices = joint_indices
         self.end_effector_link_index = end_effector_link_index
         self.joint_limits_min_deg = joint_limits_min_deg
         self.joint_limits_max_deg = joint_limits_max_deg
+        self.num_joints = num_joints
+        self.num_ik_joints = num_ik_joints
+        self.use_reference_poses = use_reference_poses
+        self.reference_poses_file = reference_poses_file
+        self.ik_position_error_threshold = ik_position_error_threshold
+        self.ik_hysteresis_threshold = ik_hysteresis_threshold
+        self.ik_movement_penalty_weight = ik_movement_penalty_weight
         self.arm_name = arm_name
         
-        # Precompute IK limits for first NUM_IK_JOINTS
-        self.ik_lower_limits = np.deg2rad(joint_limits_min_deg[:NUM_IK_JOINTS])
-        self.ik_upper_limits = np.deg2rad(joint_limits_max_deg[:NUM_IK_JOINTS])
+        # Precompute IK limits for first num_ik_joints
+        self.ik_lower_limits = np.deg2rad(joint_limits_min_deg[:self.num_ik_joints])
+        self.ik_upper_limits = np.deg2rad(joint_limits_max_deg[:self.num_ik_joints])
         self.ik_ranges = self.ik_upper_limits - self.ik_lower_limits
         
         # Load reference poses
         self.reference_poses = self._load_reference_poses()
         
         # Create FK solver for evaluating solutions
-        self.fk_solver = ForwardKinematics(physics_client, robot_id, joint_indices, end_effector_link_index)
+        self.fk_solver = ForwardKinematics(physics_client, robot_id, joint_indices, end_effector_link_index, num_joints)
     
     def _load_reference_poses(self) -> List[np.ndarray]:
         """Load reference poses from file for this arm."""
         reference_poses = []
         
         # Check if reference poses are enabled
-        if not USE_REFERENCE_POSES:
-            logger.info("Reference poses disabled in configuration")
+        if not self.use_reference_poses:
+            # Only log if explicitly disabled via config, to avoid spam if just not set
+            # logger.info("Reference poses disabled in configuration")
             return reference_poses
         
         try:
             from ..utils import get_absolute_path
-            cache_file = get_absolute_path(REFERENCE_POSES_FILE)
+            # Handle empty file path
+            if not self.reference_poses_file:
+                return reference_poses
+                
+            cache_file = get_absolute_path(self.reference_poses_file)
             if cache_file.exists():
                 with open(cache_file, 'r') as f:
                     data = json.load(f)
                 
                 arm_poses = data.get(self.arm_name, [])
                 if arm_poses:
-                    # Convert to numpy arrays and extract only the first 3 joints for IK
+                    # Convert to numpy arrays and extract only the first num_ik_joints joints for IK
                     for pose in arm_poses:
-                        pose_array = np.array(pose[:NUM_IK_JOINTS])
+                        pose_array = np.array(pose[:self.num_ik_joints])
                         pose_rad = np.deg2rad(pose_array)
                         reference_poses.append(pose_rad)
                     
@@ -126,17 +147,11 @@ class IKSolver:
                              hysteresis_threshold: float = 0.05) -> float:
         """
         Evaluate the quality of an IK solution based on position error and joint movement.
-        
-        Args:
-            solution: IK solution in radians
-            target_position: Target end effector position
-            current_joints_rad: Current joint angles in radians for movement penalty
-            hysteresis_threshold: Minimum improvement needed to switch solutions (meters)
         """
         try:
             # Convert solution to full joint array (keep other joints at 0)
-            full_angles = np.zeros(NUM_JOINTS)
-            full_angles[:NUM_IK_JOINTS] = np.rad2deg(solution)
+            full_angles = np.zeros(self.num_joints)
+            full_angles[:self.num_ik_joints] = np.rad2deg(solution)
             
             # Compute forward kinematics
             achieved_position, _ = self.fk_solver.compute(full_angles)
@@ -148,11 +163,11 @@ class IKSolver:
             movement_penalty = 0.0
             if current_joints_rad is not None:
                 # Calculate joint space distance (only for IK joints)
-                joint_diff = solution - current_joints_rad[:NUM_IK_JOINTS]
+                joint_diff = solution - current_joints_rad[:self.num_ik_joints]
                 joint_movement = np.linalg.norm(joint_diff)
                 
                 # Convert joint movement to a position-equivalent penalty
-                movement_penalty = joint_movement * IK_MOVEMENT_PENALTY_WEIGHT
+                movement_penalty = joint_movement * self.ik_movement_penalty_weight
                 
             # Total cost combines position error and movement penalty
             total_cost = position_error + movement_penalty
@@ -165,50 +180,47 @@ class IKSolver:
     def solve(self, target_position: np.ndarray, target_orientation_quat: Optional[np.ndarray], 
               current_angles_deg: np.ndarray) -> np.ndarray:
         """
-        Solve inverse kinematics for position control using first 3 joints.
-        Tries multiple reference poses and returns the best solution.
-        
-        Args:
-            target_position: Target end effector position
-            target_orientation_quat: Target orientation (optional, position-only if None)
-            current_angles_deg: Current joint angles in degrees
-            
-        Returns:
-            Joint angles for first NUM_IK_JOINTS in degrees
+        Solve inverse kinematics for position control.
         """
         if self.physics_client is None or self.robot_id is None:
-            return current_angles_deg[:NUM_IK_JOINTS]
+            return current_angles_deg[:self.num_ik_joints]
         
         # Get current actual robot position and error
         current_actual_position, _ = self.fk_solver.compute(current_angles_deg)
         current_actual_error = np.linalg.norm(current_actual_position - target_position)
         
         # Convert current angles to radians and prepare for IK state
-        # Keep gripper at neutral position to prevent gripper motion from affecting IK target
         ik_state_angles = current_angles_deg.copy()
-        ik_state_angles[5] = 0.0  # Set gripper to neutral (closed) position for IK calculation
+        # For SO-100, we might reset gripper. For general, we might not.
+        # But if we rely on stored rest poses, they might assume neutral gripper.
+        # Let's keep it simple and just use current state.
+        
         current_angles_rad = np.deg2rad(ik_state_angles)
         
         # Helper functions for state management
         def set_robot_to_current_state():
             """Helper to set robot to exact current state"""
-            for i in range(NUM_JOINTS):
+            for i in range(self.num_joints):
                 if i < len(self.joint_indices) and self.joint_indices[i] is not None:
-                    p.resetJointState(self.robot_id, self.joint_indices[i], current_angles_rad[i])
+                    # Ensure we have enough angles
+                    if i < len(current_angles_rad):
+                        p.resetJointState(self.robot_id, self.joint_indices[i], current_angles_rad[i])
         
         def set_robot_to_reference_state(ref_pose_rad: np.ndarray):
             """Helper to set robot to reference pose state"""
             full_ref_state = current_angles_rad.copy()
-            full_ref_state[:NUM_IK_JOINTS] = ref_pose_rad
-            for i in range(NUM_JOINTS):
+            # Only update IK joints
+            full_ref_state[:self.num_ik_joints] = ref_pose_rad
+            for i in range(self.num_joints):
                 if i < len(self.joint_indices) and self.joint_indices[i] is not None:
-                    p.resetJointState(self.robot_id, self.joint_indices[i], full_ref_state[i])
+                    if i < len(full_ref_state):
+                       p.resetJointState(self.robot_id, self.joint_indices[i], full_ref_state[i])
         
         # Prepare list of rest poses to try
         rest_poses_to_try = []
         
         # 1. Current configuration (most likely to be close to solution)
-        current_rest_pose = np.deg2rad(current_angles_deg[:NUM_IK_JOINTS])
+        current_rest_pose = np.deg2rad(current_angles_deg[:self.num_ik_joints])
         rest_poses_to_try.append(('current', current_rest_pose))
         
         # 2. Reference poses from recorded configurations
@@ -230,107 +242,96 @@ class IKSolver:
         # Try each rest pose configuration
         for source_name, rest_pose in rest_poses_to_try:
             try:
-                # Always start with a clean, known robot state before each IK attempt
-                if source_name == 'current':
-                    # For current pose, use exact current state
-                    set_robot_to_current_state()
-                else:
-                    # For reference poses, set to that reference configuration
-                    set_robot_to_reference_state(rest_pose)
+                # Seed the IK from the current simulation state (last solution)
+                # This makes movement much more stable and continuous
+                # if source_name == 'current':
+                #     set_robot_to_current_state()
+                # else:
+                #     set_robot_to_reference_state(rest_pose)
                 
-                # Perform IK with the appropriate rest pose
-                ik_solution = p.calculateInverseKinematics(
-                    bodyUniqueId=self.robot_id,
-                    endEffectorLinkIndex=self.end_effector_link_index,
-                    targetPosition=target_position.tolist(),
-                    lowerLimits=self.ik_lower_limits.tolist(),
-                    upperLimits=self.ik_upper_limits.tolist(),
-                    jointRanges=self.ik_ranges.tolist(),
-                    restPoses=rest_pose.tolist() if isinstance(rest_pose, np.ndarray) else rest_pose,
-                    solver=0,                                # 0 = DLS (Damped Least Squares)
-                    maxNumIterations=100,
-                    residualThreshold=1e-4
-                )
+                # Perform IK
+                ik_params = {
+                    "bodyUniqueId": self.robot_id,
+                    "endEffectorLinkIndex": self.end_effector_link_index,
+                    "targetPosition": target_position.tolist(),
+                    "lowerLimits": self.ik_lower_limits.tolist(),
+                    "upperLimits": self.ik_upper_limits.tolist(),
+                    "jointRanges": self.ik_ranges.tolist(),
+                    "solver": 0,                                # 0 = DLS
+                    "maxNumIterations": 1000,
+                    "residualThreshold": 1e-5
+                }
                 
-                # CRITICAL: Always restore to exact current state after each IK attempt
-                # This prevents state contamination between attempts
+                if target_orientation_quat is not None:
+                    ik_params["targetOrientation"] = target_orientation_quat.tolist()
+                
+                ik_solution = p.calculateInverseKinematics(**ik_params)
+                
+                # Restore state
                 set_robot_to_current_state()
                 
                 # Evaluate this solution
-                solution_array = np.array(ik_solution[:NUM_IK_JOINTS])
+                solution_array = np.array(ik_solution[:self.num_ik_joints])
                 
-                # PyBullet sometimes ignores joint limits, so clamp the solution
-                # Convert limits back to degrees for comparison
+                # Handle joint limits wrapping and clamping
                 joint_limits_min_deg = np.rad2deg(self.ik_lower_limits)
                 joint_limits_max_deg = np.rad2deg(self.ik_upper_limits)
                 solution_degrees = np.rad2deg(solution_array)
                 
                 # Check and wrap shoulder_pan (first joint) if outside limits
                 if solution_degrees[0] < joint_limits_min_deg[0] or solution_degrees[0] > joint_limits_max_deg[0]:
-                    # Try wrapping by ±360°
                     for offset in [-360.0, 360.0]:
                         wrapped_angle = solution_degrees[0] + offset
                         if joint_limits_min_deg[0] <= wrapped_angle <= joint_limits_max_deg[0]:
                             solution_degrees[0] = wrapped_angle
                             break
                     else:
-                        # If wrapping doesn't work, clamp it
                         clamped_angle = np.clip(solution_degrees[0], joint_limits_min_deg[0], joint_limits_max_deg[0])
                         solution_degrees[0] = clamped_angle
                 
                 # Clamp other joints normally
-                solution_degrees[1:] = np.clip(solution_degrees[1:], joint_limits_min_deg[1:], joint_limits_max_deg[1:])
+                if len(solution_degrees) > 1:
+                    solution_degrees[1:] = np.clip(solution_degrees[1:], joint_limits_min_deg[1:], joint_limits_max_deg[1:])
                 
-                # Convert back to radians for evaluation
                 solution_array = np.deg2rad(solution_degrees)
                 
-                # For current pose, don't penalize movement (it's the baseline)
                 if source_name == 'current':
                     error = self._evaluate_ik_solution(solution_array, target_position, None)
                     current_solution_error = error
                     current_solution_joints = solution_array.copy()
                 else:
-                    # Reference poses: calculate both position error and total error with movement penalty
                     position_only_error = self._evaluate_ik_solution(solution_array, target_position, None)
                     error = self._evaluate_ik_solution(solution_array, target_position, current_angles_rad)
                     
-                    # Track best reference pose based on total error (for tie-breaking)
                     if error < best_reference_error:
                         best_reference_error = error
                         best_reference_solution = solution_array
                         best_reference_source = source_name
                         best_reference_position_error = position_only_error
                 
-                # Keep track of the overall best solution (for logging purposes)
                 if error < best_error:
                     best_error = error
                     best_solution = solution_array
                     best_source = source_name
                 
-                # Only use early exit for extremely good current solutions
-                if source_name == 'current' and error < 0.0001:  # 0.1mm - very strict threshold
+                if source_name == 'current' and error < 0.0001:
                     break
                     
             except Exception as e:
                 logger.debug(f"IK failed with {source_name} rest pose: {e}")
-                # Always restore state even on error
                 set_robot_to_current_state()
                 continue
         
-        # Final state restoration to ensure consistency
         set_robot_to_current_state()
         
-        # Simple logic: Always prefer current pose unless reference pose is SIGNIFICANTLY better (>5cm)
-        final_solution = current_solution_joints  # Default to current pose
+        final_solution = current_solution_joints
         final_error = current_solution_error
         final_source = 'current'
         
-        # Check if any reference pose is significantly better than current pose
-        # Compare PURE POSITION ERRORS (no movement penalty) for the 5cm threshold
         if (best_reference_source is not None and current_actual_error is not None):
             position_improvement = current_actual_error - best_reference_position_error
-            if position_improvement > IK_HYSTERESIS_THRESHOLD:  # 5cm improvement in position accuracy required
-                logger.info(f"IK: Using {best_reference_source} (significant position improvement: {position_improvement:.4f}m > {IK_HYSTERESIS_THRESHOLD}m)")
+            if position_improvement > self.ik_hysteresis_threshold:
+                logger.info(f"IK: Using {best_reference_source} (significant position improvement: {position_improvement:.4f}m > {self.ik_hysteresis_threshold}m)")
                 final_solution = best_reference_solution
                 final_error = best_reference_error
                 final_source = best_reference_source
@@ -340,7 +341,7 @@ class IKSolver:
             return final_angles
         else:
             logger.warning("All IK attempts failed, returning current angles")
-            return current_angles_deg[:NUM_IK_JOINTS]
+            return current_angles_deg[:self.num_ik_joints]
 
 
 def vr_to_robot_coordinates(vr_pos: dict, scale: float = 1.0) -> np.ndarray:
@@ -364,4 +365,4 @@ def compute_relative_position(current_vr_pos: dict, origin_vr_pos: dict, scale: 
         'y': current_vr_pos['y'] - origin_vr_pos['y'], 
         'z': current_vr_pos['z'] - origin_vr_pos['z']
     }
-    return vr_to_robot_coordinates(delta_vr, scale) 
+    return vr_to_robot_coordinates(delta_vr, scale)

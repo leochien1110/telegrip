@@ -1,0 +1,50 @@
+robot_type: "ur10e_2f85"
+
+control:
+  keyboard:
+    angle_step: 5
+    enabled: true
+    gripper_step: 5.0 # Degrees
+    pos_step: 0.01
+  pybullet:
+    enabled: true
+  vr:
+    enabled: true
+
+gripper:
+  closed_angle: 45.8 # 0.8 radians in degrees
+  open_angle: 0.0
+
+ik:
+  use_reference_poses: false
+  reference_poses_file: reference_poses.json
+  position_error_threshold: 0.001
+  hysteresis_threshold: 0.05
+  movement_penalty_weight: 0.01
+
+network:
+  host_ip: 0.0.0.0
+  https_port: 8443
+  websocket_port: 8442
+
+paths:
+  urdf_path: "URDF/UR10e_2f85/urdf/ur10e_2f85.urdf"
+
+# Disable robot hardware connection for pure simulation
+enable_robot: false
+
+robot:
+  left_arm:
+    enabled: true
+    name: Left Arm
+    port: null
+  right_arm:
+    enabled: true
+    name: Right Arm
+    port: null
+  send_interval: 0.05
+  vr_to_robot_scale: 1
+
+ssl:
+  certfile: cert.pem
+  keyfile: key.pem

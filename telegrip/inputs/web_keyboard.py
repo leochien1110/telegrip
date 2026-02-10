@@ -113,8 +113,8 @@ class WebKeyboardHandler(BaseInputProvider):
                 current_angles = self.robot_interface.get_arm_angles(arm)
 
                 arm_state["origin_position"] = current_position.copy()
-                arm_state["origin_wrist_roll"] = current_angles[WRIST_ROLL_INDEX]
-                arm_state["origin_wrist_flex"] = current_angles[WRIST_FLEX_INDEX]
+                arm_state["origin_wrist_roll"] = current_angles[WRIST_ROLL_INDEX] if WRIST_ROLL_INDEX is not None else 0.0
+                arm_state["origin_wrist_flex"] = current_angles[WRIST_FLEX_INDEX] if WRIST_FLEX_INDEX is not None else 0.0
 
                 # Reset current offsets
                 arm_state["current_offset"] = np.zeros(3)
@@ -374,13 +374,14 @@ class WebKeyboardHandler(BaseInputProvider):
                     if arm_state["position_control_active"]:
 
                         # Check for idle timeout (reset origin after 1 second of inactivity)
-                        current_time = time.time()
-                        if (not arm_state["any_key_pressed"] and
-                            arm_state["last_key_time"] > 0 and
-                            current_time - arm_state["last_key_time"] >= self.idle_timeout):
-
-                            self._send_idle_reset_signal(arm)
-                            arm_state["last_key_time"] = 0
+                        # DISABLED: This repose mechanism can cause instability/jerks when origin resets
+                        # current_time = time.time()
+                        # if (not arm_state["any_key_pressed"] and
+                        #     arm_state["last_key_time"] > 0 and
+                        #     current_time - arm_state["last_key_time"] >= self.idle_timeout):
+                        # 
+                        #     self._send_idle_reset_signal(arm)
+                        #     arm_state["last_key_time"] = 0
 
                         # Update current offsets based on deltas
                         arm_state["current_offset"] += arm_state["delta_pos"]

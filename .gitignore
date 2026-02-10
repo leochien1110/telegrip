@@ -88,3 +88,6 @@ CLAUDE.md
 
 # Mac
 .DS_Store
+
+# URDF files dataset
+reference/

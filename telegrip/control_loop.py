@@ -8,9 +8,10 @@ import numpy as np
 import logging
 import time
 import queue  # Add import for thread-safe queue
+import pybullet as p
 from typing import Dict, Optional
 
-from .config import TelegripConfig, NUM_JOINTS, WRIST_FLEX_INDEX, WRIST_ROLL_INDEX, GRIPPER_INDEX
+from .config import TelegripConfig
 from .core.robot_interface import RobotInterface
 # PyBulletVisualizer will be imported on demand
 from .inputs.base import ControlGoal, ControlMode
@@ -162,6 +163,7 @@ class ControlLoop:
                 # Update visualization
                 if self.visualizer:
                     self._update_visualization()
+                    self.visualizer.step_simulation() # Ensure GUI processes events
                 
                 # Periodic logging
                 self._periodic_logging()
@@ -206,11 +208,23 @@ class ControlLoop:
             left_angles = self.robot_interface.get_arm_angles("left")
             right_angles = self.robot_interface.get_arm_angles("right")
             
-            self.left_arm.current_wrist_roll = left_angles[WRIST_ROLL_INDEX]
-            self.right_arm.current_wrist_roll = right_angles[WRIST_ROLL_INDEX]
+            # Use dynamic indices from robot config
+            wr_idx = self.robot_interface.robot_config.get("wrist_roll_index")
+            wf_idx = self.robot_interface.robot_config.get("wrist_flex_index")
             
-            self.left_arm.current_wrist_flex = left_angles[WRIST_FLEX_INDEX]
-            self.right_arm.current_wrist_flex = right_angles[WRIST_FLEX_INDEX]
+            if wr_idx is not None and wr_idx < len(left_angles):
+                self.left_arm.current_wrist_roll = left_angles[wr_idx]
+                self.right_arm.current_wrist_roll = right_angles[wr_idx]
+            else:
+                self.left_arm.current_wrist_roll = 0.0
+                self.right_arm.current_wrist_roll = 0.0
+                
+            if wf_idx is not None and wf_idx < len(left_angles):
+                self.left_arm.current_wrist_flex = left_angles[wf_idx]
+                self.right_arm.current_wrist_flex = right_angles[wf_idx]
+            else:
+                self.left_arm.current_wrist_flex = 0.0
+                self.right_arm.current_wrist_flex = 0.0
             
             logger.info(f"Initialized left arm at position: {left_pos.round(3)}")
             logger.info(f"Initialized right arm at position: {right_pos.round(3)}")
@@ -305,10 +319,18 @@ class ControlLoop:
                 arm_state.target_position = current_position.copy()
                 arm_state.goal_position = current_position.copy()
                 arm_state.origin_position = current_position.copy()
-                arm_state.current_wrist_roll = current_angles[WRIST_ROLL_INDEX]
-                arm_state.current_wrist_flex = current_angles[WRIST_FLEX_INDEX]
-                arm_state.origin_wrist_roll_angle = current_angles[WRIST_ROLL_INDEX]
-                arm_state.origin_wrist_flex_angle = current_angles[WRIST_FLEX_INDEX]
+                
+                # Get dynamic indices
+                wr_idx = self.robot_interface.robot_config.get("wrist_roll_index")
+                wf_idx = self.robot_interface.robot_config.get("wrist_flex_index")
+                
+                if wr_idx is not None and wr_idx < len(current_angles):
+                    arm_state.current_wrist_roll = current_angles[wr_idx]
+                    arm_state.origin_wrist_roll_angle = current_angles[wr_idx]
+                
+                if wf_idx is not None and wf_idx < len(current_angles):
+                    arm_state.current_wrist_flex = current_angles[wf_idx]
+                    arm_state.origin_wrist_flex_angle = current_angles[wf_idx]
                 
                 logger.info(f"🔄 {goal.arm.upper()} arm: Target position reset to current robot position (idle timeout)")
             return
@@ -327,10 +349,18 @@ class ControlLoop:
                     arm_state.target_position = current_position.copy()
                     arm_state.goal_position = current_position.copy()
                     arm_state.origin_position = current_position.copy()
-                    arm_state.current_wrist_roll = current_angles[WRIST_ROLL_INDEX]
-                    arm_state.current_wrist_flex = current_angles[WRIST_FLEX_INDEX]
-                    arm_state.origin_wrist_roll_angle = current_angles[WRIST_ROLL_INDEX]
-                    arm_state.origin_wrist_flex_angle = current_angles[WRIST_FLEX_INDEX]
+                    
+                    # Get dynamic indices
+                    wr_idx = self.robot_interface.robot_config.get("wrist_roll_index")
+                    wf_idx = self.robot_interface.robot_config.get("wrist_flex_index")
+                    
+                    if wr_idx is not None and wr_idx < len(current_angles):
+                        arm_state.current_wrist_roll = current_angles[wr_idx]
+                        arm_state.origin_wrist_roll_angle = current_angles[wr_idx]
+                    
+                    if wf_idx is not None and wf_idx < len(current_angles):
+                        arm_state.current_wrist_flex = current_angles[wf_idx]
+                        arm_state.origin_wrist_flex_angle = current_angles[wf_idx]
                 
                 logger.info(f"🔒 {goal.arm.upper()} arm: Position control ACTIVATED (target reset to current position)")
                 
@@ -401,35 +431,43 @@ class ControlLoop:
         if not self.robot_interface:
             return
         
-        # Update left arm (only if connected)
-        if (self.left_arm.mode == ControlMode.POSITION_CONTROL and 
-            self.left_arm.target_position is not None and
-            self.robot_interface.get_arm_connection_status("left")):
-            
-            # Solve IK
-            ik_solution = self.robot_interface.solve_ik("left", self.left_arm.target_position)
-            
-            # Update robot angles
-            current_gripper = self.robot_interface.get_arm_angles("left")[GRIPPER_INDEX]
-            self.robot_interface.update_arm_angles("left", ik_solution, 
-                                                 self.left_arm.current_wrist_flex, 
-                                                 self.left_arm.current_wrist_roll, 
-                                                 current_gripper)
+        def update_arm(arm_name, arm_state):
+             # Update arm (only if connected)
+            if (arm_state.mode == ControlMode.POSITION_CONTROL and 
+                arm_state.target_position is not None and
+                self.robot_interface.get_arm_connection_status(arm_name)):
+                
+                # Prepare orientation for 6-DOF robots
+                target_orientation = None
+                if self.robot_interface.num_ik_joints >= 6:
+                    # Convert roll and flex (pitch) to quaternion
+                    # Note: We assume yaw is 0 for keyboard control
+                    target_orientation = np.array(p.getQuaternionFromEuler([
+                        np.deg2rad(arm_state.current_wrist_roll),
+                        np.deg2rad(arm_state.current_wrist_flex),
+                        0.0  # Assumed yaw
+                    ]))
 
-        # Update right arm (only if connected)
-        if (self.right_arm.mode == ControlMode.POSITION_CONTROL and 
-            self.right_arm.target_position is not None and
-            self.robot_interface.get_arm_connection_status("right")):
+                # Solve IK
+                ik_solution = self.robot_interface.solve_ik(arm_name, arm_state.target_position, target_orientation)
+                
+                # Get current gripper state
+                current_gripper_angle = 0.0
+                g_idx = self.robot_interface.robot_config.get("gripper_index")
+                if g_idx is not None:
+                    # Retrieve current angle
+                    angles = self.robot_interface.get_arm_angles(arm_name)
+                    if g_idx < len(angles):
+                        current_gripper_angle = angles[g_idx]
+
+                # Update robot angles
+                self.robot_interface.update_arm_angles(arm_name, ik_solution, 
+                                                    arm_state.current_wrist_flex, 
+                                                    arm_state.current_wrist_roll, 
+                                                    current_gripper_angle)
             
-            # Solve IK
-            ik_solution = self.robot_interface.solve_ik("right", self.right_arm.target_position)
-            
-            # Update robot angles
-            current_gripper = self.robot_interface.get_arm_angles("right")[GRIPPER_INDEX]
-            self.robot_interface.update_arm_angles("right", ik_solution, 
-                                                  self.right_arm.current_wrist_flex, 
-                                                  self.right_arm.current_wrist_roll, 
-                                                  current_gripper)
+        update_arm("left", self.left_arm)
+        update_arm("right", self.right_arm)
 
         # Send commands to robot
         if self.robot_interface.is_connected and self.robot_interface.is_engaged:
@@ -523,4 +561,4 @@ class ControlLoop:
             "left_arm_connected": self.robot_interface.get_arm_connection_status("left") if self.robot_interface else False,
             "right_arm_connected": self.robot_interface.get_arm_connection_status("right") if self.robot_interface else False,
             "visualizer_connected": self.visualizer.is_connected if self.visualizer else False,
-        } 
+        }
